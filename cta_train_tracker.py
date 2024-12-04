@@ -4,6 +4,7 @@ import boto3
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from geopy.distance import geodesic
+from sagemaker.predictor import Predictor
 
 # Constants
 API_KEY = "5e23a507898a45bb83c1b91b24263d71"
@@ -13,6 +14,10 @@ REGION = "us-east-2"
 
 # DynamoDB Client
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
+
+# Attach to the SageMaker endpoint
+endpoint_name = "cta-ridership-predictor"  # Use the exact name of your endpoint
+xgboost_predictor = Predictor(endpoint_name=endpoint_name)
 
 # Load Station Data
 def load_station_data(file_path):
@@ -53,6 +58,7 @@ def search_station():
         display_arrivals_with_direction(arrivals)
     except Exception as e:
         print(f"An error occurred: {e}")
+
 def parse_train_arrivals_with_direction(xml_data):
     root = ET.fromstring(xml_data)
     arrivals = []
@@ -173,6 +179,103 @@ def fetch_home_location(user_id):
     response = table.get_item(Key={"user_id": user_id})
     return response.get("Item", None)
 
+
+
+def estimate_crowdedness_and_wait_time(station_id, daytype_encoded, ridership_threshold=5000):
+    """
+    Estimate whether a station will be crowded and the expected wait time based on ridership data.
+    
+    Parameters:
+    - station_id (int): The ID of the station.
+    - daytype_encoded (int): Encoded day type (0=Weekday, 1=Saturday, 2=Sunday/Holiday).
+    - ridership_threshold (int): Threshold for crowdedness (default: 5000).
+    
+    Returns:
+    - dict: Contains crowdedness status and expected wait time.
+    """
+    try:
+        # Predict ridership using SageMaker endpoint
+        payload = f"{station_id},{daytype_encoded}"
+        response = xgboost_predictor.predict(payload, initial_args={"ContentType": "text/csv"})
+        predicted_rides = int(float(response.decode("utf-8")))
+
+        # Determine crowdedness
+        crowded = predicted_rides > ridership_threshold
+        crowded_status = "Crowded" if crowded else "Not Crowded"
+
+        # Estimate wait time
+        # Assumes a base wait time and additional delay based on crowdedness
+        base_wait_time = 5  # minutes
+        additional_wait_time = (predicted_rides / ridership_threshold) * 5 if crowded else 0
+        total_wait_time = base_wait_time + additional_wait_time
+
+        return {
+            "predicted_rides": predicted_rides,
+            "crowded_status": crowded_status,
+            "expected_wait_time": round(total_wait_time, 2),  # in minutes
+        }
+
+    except Exception as e:
+        print(f"Error estimating crowdedness and wait time: {e}")
+        return None
+
+def ridership_prediction_with_crowdedness(station_data):
+    station_name = input("Enter the station name (e.g., 'Foster'): ")
+    station_info = station_data[station_data['STATION_NAME'].str.contains(station_name, case=False, na=False)]
+    if station_info.empty:
+        print(f"Station '{station_name}' not found.")
+        return
+
+    station_id = station_info.iloc[0]["MAP_ID"]
+
+    daytype = input("Enter day type (W for Weekday, A for Saturday, U for Sunday/Holiday): ").strip().upper()
+    daytype_mapping = {"W": 0, "A": 1, "U": 2}
+    if daytype not in daytype_mapping:
+        print("Invalid day type. Please enter W, A, or U.")
+        return
+
+    daytype_encoded = daytype_mapping[daytype]
+
+    # Call the new estimation function
+    results = estimate_crowdedness_and_wait_time(station_id, daytype_encoded)
+    if results:
+        print(f"\nEstimated Ridership for '{station_name}': {results['predicted_rides']} rides.")
+        print(f"Crowdedness Status: {results['crowded_status']}")
+        print(f"Expected Wait Time: {results['expected_wait_time']} minutes")
+
+
+def ridership_prediction(station_data):
+    
+
+    station_name = input("Enter the station name (e.g., 'Foster'): ")
+    station_info = station_data[station_data['STATION_NAME'].str.contains(station_name, case=False, na=False)]
+
+    if station_info.empty:
+        print(f"Station '{station_name}' not found.")
+        return
+
+    station_id = station_info.iloc[0]["MAP_ID"]
+
+    daytype = input("Enter day type (W for Weekday, A for Saturday, U for Sunday/Holiday): ").strip().upper()
+    daytype_mapping = {"W": 0, "A": 1, "U": 2}
+    if daytype not in daytype_mapping:
+        print("Invalid day type. Please enter W, A, or U.")
+        return
+
+    daytype_encoded = daytype_mapping[daytype]
+
+    # Predict ridership
+    try:
+        payload = f"{station_id},{daytype_encoded}"
+        response = xgboost_predictor.predict(
+            payload,
+            initial_args={"ContentType": "text/csv"}
+        )
+        predicted_rides = int(float(response.decode("utf-8")))
+        print(f"Estimated ridership for '{station_name}' on the selected day: {predicted_rides} rides.")
+    except Exception as e:
+        print(f"Error predicting ridership: {e}")
+
 # Main Menu
 def main():
     file_path = "./CTA_-_System_Information_-_List_of__L__Stops_20241203.csv"
@@ -198,7 +301,7 @@ def main():
         elif choice == "4":
             search_with_distance(user_id, station_data)
         elif choice == "5":
-            print("TODO: Implement ridership predictions.")
+            ridership_prediction_with_crowdedness(station_data)
         elif choice == "6":
             print("Exiting program. Goodbye!")
             break
