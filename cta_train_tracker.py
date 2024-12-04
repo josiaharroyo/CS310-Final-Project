@@ -3,6 +3,7 @@ import requests
 import boto3
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from geopy.distance import geodesic
 
 # Constants
 API_KEY = "5e23a507898a45bb83c1b91b24263d71"
@@ -126,17 +127,46 @@ def display_arrivals(arrivals):
     for train in sorted(arrivals, key=lambda x: x["minutes_to_arrival"])[:5]:
         print(f"To {train['destination']} in {train['minutes_to_arrival']} minutes ({train['status']}).")
 
-# Option 4: Search Station and Distance to Home
+
 def search_with_distance(user_id, station_data):
+    # Fetch home location from DynamoDB
     home = fetch_home_location(user_id)
     if not home:
         print("Home location not set. Please set a home location first.")
         return
 
-    print(f"Your home location is '{home['home_stop']}'.")
+    # Find home station details
+    home_station = station_data[station_data["MAP_ID"] == int(home["map_id"])]
+    if home_station.empty:
+        print("Home station details not found in station data.")
+        return
+
+    home_coords = tuple(map(float, home_station.iloc[0]["Location"].strip("()").split(", ")))
+
+    # Get target station input
     station_id = input("Enter the station MAP_ID to calculate distance to home: ")
-    # Placeholder for actual distance calculation
-    print(f"TODO: Calculate distance from {station_id} to {home['map_id']}.")
+    target_station = station_data[station_data["MAP_ID"] == int(station_id)]
+    if target_station.empty:
+        print(f"Station with MAP_ID {station_id} not found.")
+        return
+
+    # Extract target station coordinates
+    target_coords = tuple(map(float, target_station.iloc[0]["Location"].strip("()").split(", ")))
+
+    # Calculate distance
+    distance = geodesic(home_coords, target_coords).miles
+    print(f"The distance between '{home['home_stop']}' and '{target_station.iloc[0]['STATION_NAME']}' is approximately {distance:.2f} miles.")
+
+    # Optionally, display train arrivals for the target station
+    view_trains = input("Do you want to view train arrivals for this station? (yes/no): ").strip().lower()
+    if view_trains == "yes":
+        try:
+            xml_data = fetch_train_arrivals(station_id)
+            arrivals = parse_train_arrivals_with_direction(xml_data)
+            display_arrivals_with_direction(arrivals)
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
 
 def fetch_home_location(user_id):
     table = dynamodb.Table(DYNAMODB_TABLE)
